@@ -21,6 +21,7 @@
             display: flex;
             flex-direction: column;
             gap: 10px;
+            z-index: 5;
         }
         .stats {
             background: rgba(0,0,0,0.6);
@@ -81,6 +82,23 @@
             transition: opacity 0.2s;
             pointer-events: none;
         }
+        /* Minimap Styles */
+        #minimap-container {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 150px;
+            height: 150px;
+            background: rgba(0, 0, 0, 0.5);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            overflow: hidden;
+            backdrop-filter: blur(5px);
+            pointer-events: none;
+        }
+        #minimap-canvas {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -93,6 +111,11 @@
             Position: <span id="pos-display">0, 0, 0</span><br>
             Time: <span id="time-display">Day</span>
         </div>
+    </div>
+
+    <!-- Minimap UI -->
+    <div id="minimap-container">
+        <canvas id="minimap-canvas" width="150" height="150"></canvas>
     </div>
 
     <div id="crosshair"></div>
@@ -119,10 +142,7 @@
 
             init() {
                 if (this.ctx) return;
-                // Web Audio Context for SFX
                 this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-                
-                // External BGM Setup (No Copyright/Royalty Free)
                 this.bgm = new Audio('https://cdn.pixabay.com/audio/2022/01/18/audio_d0a13f69d2.mp3');
                 this.bgm.loop = true;
                 this.bgm.volume = 0.4;
@@ -178,6 +198,7 @@
         let camera, scene, renderer, player;
         let coins = [];
         let prevTime = performance.now();
+        let minimapCanvas, minimapCtx;
 
         function getTerrainHeight(x, z) {
             return Math.sin(x * 0.05) * Math.cos(z * 0.05) * 3 + Math.sin(x * 0.01) * 5;
@@ -217,6 +238,10 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.shadowMap.enabled = true;
             document.body.appendChild(renderer.domElement);
+
+            // Setup Minimap
+            minimapCanvas = document.getElementById('minimap-canvas');
+            minimapCtx = minimapCanvas.getContext('2d');
 
             setupControls();
             window.addEventListener('resize', onWindowResize);
@@ -285,12 +310,10 @@
                 if (document.pointerLockElement === document.body) {
                     instructions.style.opacity = '0';
                     instructions.style.pointerEvents = 'none';
-                    // Resume music if it was paused
                     GameAudio.startBGM();
                 } else {
                     instructions.style.opacity = '1';
                     instructions.style.pointerEvents = 'auto';
-                    // Stop music when mouse is unlocked (ESC pressed)
                     GameAudio.pauseBGM();
                 }
             });
@@ -337,6 +360,47 @@
             setTimeout(() => { hint.style.opacity = '0'; }, 1000);
         }
 
+        function updateMinimap() {
+            if (!minimapCtx) return;
+            
+            const size = minimapCanvas.width;
+            minimapCtx.clearRect(0, 0, size, size);
+            
+            // Map world coordinates [-500, 500] to canvas [0, 150]
+            const scale = size / WORLD_SIZE;
+            const offset = WORLD_SIZE / 2;
+
+            // Draw Coins
+            minimapCtx.fillStyle = '#ffd700';
+            coins.forEach(coin => {
+                const cx = (coin.position.x + offset) * scale;
+                const cz = (coin.position.z + offset) * scale;
+                minimapCtx.beginPath();
+                minimapCtx.arc(cx, cz, 1.5, 0, Math.PI * 2);
+                minimapCtx.fill();
+            });
+
+            // Draw Player
+            const px = (camera.position.x + offset) * scale;
+            const pz = (camera.position.z + offset) * scale;
+            
+            // Player Dot
+            minimapCtx.fillStyle = '#00ff00';
+            minimapCtx.beginPath();
+            minimapCtx.arc(px, pz, 3, 0, Math.PI * 2);
+            minimapCtx.fill();
+
+            // Player View Direction Cone
+            const camDir = new THREE.Vector3();
+            camera.getWorldDirection(camDir);
+            minimapCtx.strokeStyle = '#00ff00';
+            minimapCtx.lineWidth = 2;
+            minimapCtx.beginPath();
+            minimapCtx.moveTo(px, pz);
+            minimapCtx.lineTo(px + camDir.x * 12, pz + camDir.z * 12);
+            minimapCtx.stroke();
+        }
+
         function animate() {
             requestAnimationFrame(animate);
             const time = performance.now();
@@ -346,7 +410,7 @@
                 // Friction
                 worldData.velocity.x -= worldData.velocity.x * 10.0 * delta;
                 worldData.velocity.z -= worldData.velocity.z * 10.0 * delta;
-                worldData.velocity.y -= 9.8 * 14.0 * delta; // Gravity
+                worldData.velocity.y -= 9.8 * 14.0 * delta; 
 
                 // Input processing
                 worldData.direction.z = Number(worldData.moveForward) - Number(worldData.moveBackward);
@@ -407,6 +471,9 @@
                 document.getElementById('pos-display').innerText = 
                     `${Math.round(camera.position.x)}, ${Math.round(camera.position.y)}, ${Math.round(camera.position.z)}`;
             }
+
+            // Update Minimap every frame
+            updateMinimap();
 
             worldData.time += delta * 0.02;
             const skyFactor = 0.5 + Math.sin(worldData.time) * 0.4;
