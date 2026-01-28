@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Gold Quest</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #000;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            pointer-events: none;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .stats {
+            background: rgba(0,0,0,0.6);
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.1);
+            backdrop-filter: blur(5px);
+        }
+        #score-container {
+            font-size: 24px;
+            font-weight: bold;
+            color: #ffd700;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 6px;
+            height: 6px;
+            background: rgba(255,255,255,0.8);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+        #instructions {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.8);
+            padding: 40px;
+            border-radius: 20px;
+            color: white;
+            text-align: center;
+            cursor: pointer;
+            transition: opacity 0.3s;
+            border: 2px solid #ffd700;
+            z-index: 10;
+        }
+        kbd {
+            background: #333;
+            padding: 2px 8px;
+            border-radius: 4px;
+            border: 1px solid #555;
+            font-family: monospace;
+        }
+        .collect-msg {
+            position: absolute;
+            bottom: 20%;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #ffd700;
+            font-weight: bold;
+            opacity: 0;
+            transition: opacity 0.2s;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="score-container" class="stats">
+            🪙 Coins: <span id="score-display">0</span> / <span id="total-coins">0</span>
+        </div>
+        <div class="stats">
+            Position: <span id="pos-display">0, 0, 0</span><br>
+            Time: <span id="time-display">Day</span>
+        </div>
+    </div>
+
+    <div id="crosshair"></div>
+    <div id="collect-hint" class="collect-msg">COIN COLLECTED!</div>
+
+    <div id="instructions">
+        <h2 style="color: #ffd700;">GOLD QUEST</h2>
+        <p>Explore the valley and collect all the hidden gold coins.</p>
+        <p><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> to Move | <kbd>SPACE</kbd> to Jump</p>
+        <p><b>Mouse</b> to look around</p>
+        <h3 style="margin-top:20px; color: #4facfe; cursor: pointer;">CLICK TO START ADVENTURE</h3>
+        <p style="font-size: 12px; margin-top: 10px; color: #aaa;">Music will stop when you press ESC</p>
+    </div>
+
+    <!-- Load Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- Audio Controller ---
+        const GameAudio = {
+            ctx: null,
+            bgm: null,
+            isBgmPlaying: false,
+
+            init() {
+                if (this.ctx) return;
+                // Web Audio Context for SFX
+                this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // External BGM Setup (No Copyright/Royalty Free)
+                this.bgm = new Audio('https://cdn.pixabay.com/audio/2022/01/18/audio_d0a13f69d2.mp3');
+                this.bgm.loop = true;
+                this.bgm.volume = 0.4;
+            },
+
+            playCoinSound() {
+                if (!this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(900, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(1400, this.ctx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.3, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.3);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.3);
+            },
+
+            startBGM() {
+                if (!this.bgm) return;
+                this.bgm.play().then(() => {
+                    this.isBgmPlaying = true;
+                }).catch(e => {
+                    console.log("Audio playback failed:", e);
+                });
+            },
+
+            pauseBGM() {
+                if (!this.bgm) return;
+                this.bgm.pause();
+                this.isBgmPlaying = false;
+            }
+        };
+
+        const WORLD_SIZE = 1000;
+        const BOUNDARY = WORLD_SIZE / 2 - 10;
+        const COIN_COUNT = 50;
+
+        const worldData = {
+            moveForward: false,
+            moveBackward: false,
+            moveLeft: false,
+            moveRight: false,
+            canJump: false,
+            velocity: new THREE.Vector3(),
+            direction: new THREE.Vector3(),
+            time: 0,
+            score: 0
+        };
+
+        let camera, scene, renderer, player;
+        let coins = [];
+        let prevTime = performance.now();
+
+        function getTerrainHeight(x, z) {
+            return Math.sin(x * 0.05) * Math.cos(z * 0.05) * 3 + Math.sin(x * 0.01) * 5;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb);
+            scene.fog = new THREE.FogExp2(0x87ceeb, 0.01);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 10, 0); 
+            camera.rotation.order = 'YXZ';
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+
+            const sunLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            sunLight.position.set(50, 100, 50);
+            sunLight.castShadow = true;
+            scene.add(sunLight);
+
+            createTerrain();
+            createScenery();
+            createCoins();
+
+            player = new THREE.Group();
+            const body = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.4, 0.4, 1.2, 8),
+                new THREE.MeshStandardMaterial({ color: 0x222222 })
+            );
+            player.add(body);
+            scene.add(player);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            setupControls();
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        function createTerrain() {
+            const geometry = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, 128, 128);
+            geometry.rotateX(-Math.PI / 2);
+            const vertices = geometry.attributes.position.array;
+            for (let i = 0; i < vertices.length; i += 3) {
+                vertices[i + 1] = getTerrainHeight(vertices[i], vertices[i + 2]);
+            }
+            geometry.computeVertexNormals();
+            const material = new THREE.MeshStandardMaterial({ color: 0x2d4c36, roughness: 0.9 });
+            const floor = new THREE.Mesh(geometry, material);
+            floor.receiveShadow = true;
+            scene.add(floor);
+        }
+
+        function createScenery() {
+            for(let i = 0; i < 150; i++) {
+                const x = (Math.random() - 0.5) * (WORLD_SIZE - 100);
+                const z = (Math.random() - 0.5) * (WORLD_SIZE - 100);
+                const y = getTerrainHeight(x, z);
+                const tree = new THREE.Group();
+                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.4, 2), new THREE.MeshStandardMaterial({ color: 0x4d2a1a }));
+                trunk.position.y = 1;
+                const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.2, 3.5, 6), new THREE.MeshStandardMaterial({ color: 0x1a3c2a }));
+                leaves.position.y = 3;
+                tree.add(trunk); tree.add(leaves);
+                tree.position.set(x, y, z);
+                scene.add(tree);
+            }
+        }
+
+        function createCoins() {
+            const coinGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.1, 16);
+            const coinMat = new THREE.MeshStandardMaterial({ 
+                color: 0xffd700, metalness: 0.8, roughness: 0.2,
+                emissive: 0xffaa00, emissiveIntensity: 0.2
+            });
+            for(let i = 0; i < COIN_COUNT; i++) {
+                const x = (Math.random() - 0.5) * (WORLD_SIZE - 60);
+                const z = (Math.random() - 0.5) * (WORLD_SIZE - 60);
+                const y = getTerrainHeight(x, z) + 1.2;
+                const coin = new THREE.Mesh(coinGeo, coinMat);
+                coin.rotation.x = Math.PI / 2;
+                coin.position.set(x, y, z);
+                coin.castShadow = true;
+                scene.add(coin);
+                coins.push(coin);
+            }
+            document.getElementById('total-coins').innerText = COIN_COUNT;
+        }
+
+        function setupControls() {
+            const instructions = document.getElementById('instructions');
+            instructions.addEventListener('click', () => {
+                document.body.requestPointerLock();
+                GameAudio.init();
+                GameAudio.startBGM();
+            });
+
+            document.addEventListener('pointerlockchange', () => {
+                if (document.pointerLockElement === document.body) {
+                    instructions.style.opacity = '0';
+                    instructions.style.pointerEvents = 'none';
+                    // Resume music if it was paused
+                    GameAudio.startBGM();
+                } else {
+                    instructions.style.opacity = '1';
+                    instructions.style.pointerEvents = 'auto';
+                    // Stop music when mouse is unlocked (ESC pressed)
+                    GameAudio.pauseBGM();
+                }
+            });
+
+            const onKeyDown = (e) => {
+                if (e.code === 'KeyW' || e.code === 'ArrowUp') worldData.moveForward = true;
+                if (e.code === 'KeyA' || e.code === 'ArrowLeft') worldData.moveLeft = true;
+                if (e.code === 'KeyS' || e.code === 'ArrowDown') worldData.moveBackward = true;
+                if (e.code === 'KeyD' || e.code === 'ArrowRight') worldData.moveRight = true;
+                if (e.code === 'Space' && worldData.canJump) {
+                    worldData.velocity.y += 35; 
+                    worldData.canJump = false;
+                }
+            };
+
+            const onKeyUp = (e) => {
+                if (e.code === 'KeyW' || e.code === 'ArrowUp') worldData.moveForward = false;
+                if (e.code === 'KeyA' || e.code === 'ArrowLeft') worldData.moveLeft = false;
+                if (e.code === 'KeyS' || e.code === 'ArrowDown') worldData.moveBackward = false;
+                if (e.code === 'KeyD' || e.code === 'ArrowRight') worldData.moveRight = false;
+            };
+
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+
+            document.addEventListener('mousemove', (e) => {
+                if (document.pointerLockElement === document.body) {
+                    camera.rotation.y -= e.movementX * 0.002;
+                    camera.rotation.x -= e.movementY * 0.002;
+                    camera.rotation.x = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, camera.rotation.x));
+                }
+            });
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function showCollectHint() {
+            const hint = document.getElementById('collect-hint');
+            hint.style.opacity = '1';
+            setTimeout(() => { hint.style.opacity = '0'; }, 1000);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = performance.now();
+            const delta = Math.min((time - prevTime) / 1000, 0.1);
+
+            if (document.pointerLockElement === document.body) {
+                // Friction
+                worldData.velocity.x -= worldData.velocity.x * 10.0 * delta;
+                worldData.velocity.z -= worldData.velocity.z * 10.0 * delta;
+                worldData.velocity.y -= 9.8 * 14.0 * delta; // Gravity
+
+                // Input processing
+                worldData.direction.z = Number(worldData.moveForward) - Number(worldData.moveBackward);
+                worldData.direction.x = Number(worldData.moveRight) - Number(worldData.moveLeft);
+                
+                if (worldData.direction.lengthSq() > 0) {
+                    worldData.direction.normalize();
+                    if (worldData.moveForward || worldData.moveBackward) {
+                        worldData.velocity.z -= worldData.direction.z * 400.0 * delta;
+                    }
+                    if (worldData.moveLeft || worldData.moveRight) {
+                        worldData.velocity.x -= worldData.direction.x * 400.0 * delta;
+                    }
+                }
+
+                const camDir = new THREE.Vector3();
+                camera.getWorldDirection(camDir);
+                camDir.y = 0; 
+                camDir.normalize();
+                const camSide = new THREE.Vector3().crossVectors(camera.up, camDir).normalize();
+
+                camera.position.add(camDir.clone().multiplyScalar(-worldData.velocity.z * delta));
+                camera.position.add(camSide.clone().multiplyScalar(worldData.velocity.x * delta));
+                camera.position.y += (worldData.velocity.y * delta);
+
+                camera.position.x = Math.max(-BOUNDARY, Math.min(BOUNDARY, camera.position.x));
+                camera.position.z = Math.max(-BOUNDARY, Math.min(BOUNDARY, camera.position.z));
+
+                const groundHeight = getTerrainHeight(camera.position.x, camera.position.z);
+                const eyeHeight = 2.0;
+
+                if (camera.position.y < groundHeight + eyeHeight) {
+                    worldData.velocity.y = 0;
+                    camera.position.y = groundHeight + eyeHeight;
+                    worldData.canJump = true;
+                }
+
+                for (let i = coins.length - 1; i >= 0; i--) {
+                    const coin = coins[i];
+                    coin.rotation.z += 0.05; 
+                    coin.position.y = getTerrainHeight(coin.position.x, coin.position.z) + 1.2 + Math.sin(time * 0.005) * 0.1;
+
+                    const dist = camera.position.distanceTo(coin.position);
+                    if (dist < 1.8) {
+                        scene.remove(coin);
+                        coins.splice(i, 1);
+                        worldData.score++;
+                        document.getElementById('score-display').innerText = worldData.score;
+                        GameAudio.playCoinSound();
+                        showCollectHint();
+                        if (worldData.score === COIN_COUNT) {
+                            document.getElementById('collect-hint').innerText = "ALL COINS COLLECTED! YOU WIN!";
+                            document.getElementById('collect-hint').style.opacity = '1';
+                        }
+                    }
+                }
+
+                document.getElementById('pos-display').innerText = 
+                    `${Math.round(camera.position.x)}, ${Math.round(camera.position.y)}, ${Math.round(camera.position.z)}`;
+            }
+
+            worldData.time += delta * 0.02;
+            const skyFactor = 0.5 + Math.sin(worldData.time) * 0.4;
+            const skyColor = new THREE.Color().setHSL(0.6, 0.4, Math.max(0.1, skyFactor));
+            scene.background = skyColor;
+            scene.fog.color = skyColor;
+            document.getElementById('time-display').innerText = Math.sin(worldData.time) > 0 ? "Day" : "Night";
+
+            renderer.render(scene, camera);
+            prevTime = time;
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
